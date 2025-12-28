@@ -9,7 +9,7 @@ const SERVER_ARGS = ["tsx", "src/mcp/server.ts"];
 const DEFAULT_FOCUS_BASE = "https://example.org/guardian#";
 const DEFAULT_CLASS = `${DEFAULT_FOCUS_BASE}Person`;
 const MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
-const MAX_STEPS = 6;
+const MAX_STEPS = 10;
 const MAX_CLASSES = 10;
 const MAX_NODES = 30;
 const MAX_EDGES_PER_NODE = 200;
@@ -335,6 +335,11 @@ async function run(
   };
 
   const facts = JSON.stringify(factsObj, null, 2);
+  log(`FACTS nodes=${factsObj.nodes.length}, classes=${factsObj.classes.length}, steps=${factsObj.steps.length}`);
+  factsObj.nodes.forEach((n) => {
+    log(`node ${lastSegment(n.iri)} edges=${n.edges.length} complete=${n.complete_outgoing} truncated=${n.edges_truncated}`);
+  });
+  log(`LLM input (trimmed 1k): ${facts.substring(0, 1000)}${facts.length > 1000 ? "..." : ""}`);
   const llm = await answerWithLLM(question, factsObj, log);
 
   await client.close();

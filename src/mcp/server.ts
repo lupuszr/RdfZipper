@@ -7,7 +7,7 @@ import { CursorStore, ZipperEngine, type Move } from '../lib/zipper.js';
 const DEFAULT_ENDPOINT = process.env.BLAZEGRAPH_ENDPOINT ?? 'http://localhost:8889/blazegraph/namespace/kb/sparql';
 const MAX_EDGES_CAP = 200;
 const DEFAULT_MAX_EDGES = 50;
-const LIST_CAP = 50;
+const LIST_CAP = 1000;
 
 const DEFAULT_ALLOWED = [
   'https://example.org/guardian#age',
