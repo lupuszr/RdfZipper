@@ -11,11 +11,16 @@
     "blazegraph:down": "docker compose down",
     "demo:load": "tsx scripts/load-demo.ts",
     "demo:clear": "tsx scripts/clear-all.ts",
-    "tui": "tsx src/tui.ts"
+    "tui": "tsx src/tui.ts",
+    "mcp:server": "tsx src/mcp/server.ts",
+    "mcp:ask": "tsx scripts/mcp-ask.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
     "blessed": "^0.1.81",
-    "commander": "^12.1.0"
+    "commander": "^12.1.0",
+    "openai": "^4.77.4",
+    "zod": "^4.2.1"
   },
   "devDependencies": {
     "@types/blessed": "^0.1.25",

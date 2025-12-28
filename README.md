@@ -46,9 +46,26 @@ npm run demo:load
 
 If it fails with a namespace mismatch, delete any persisted Blazegraph journal/volume and recreate the namespace (the properties must match the expected axioms/quads/truthMaintenance settings).
 
-## 4) Run the TUI
+## 4) MCP server (stdio)
 
-The default allowlist now includes the inference predicates (`urn:test#hasAncestor`, `urn:test#hasParent`) so inferred ancestor edges are visible when you navigate.
+```bash
+npm run mcp:server
+```
+
+Exposes zipper-only tools: `open`, `moves`/`refresh`, `applyFollow`, `back`, `listClasses`, `listIriByClass`, `ping`. Defaults to the same allowlist as the TUI (includes `hasAncestor`).
+
+## 5) MCP ask (toy NL → MCP planner)
+
+```bash
+npm run mcp:ask -- --question "Who is the grandfather of Alice?"
+```
+
+- Uses a tiny planner: if `OPENAI_API_KEY` is set, it asks the LLM to pick the MCP tool/args and to phrase the answer from extracted facts; otherwise it falls back to a deterministic plan and prints the facts (parents/ancestors).
+- Traverses via MCP tools only; no direct SPARQL.
+
+## 6) Run the TUI
+
+The default allowlist now includes the inference predicates (`https://example.org/guardian#hasAncestor`, `https://example.org/guardian#hasParent`) so inferred ancestor edges are visible when you navigate.
 
 ```bash
 npm run tui
