@@ -1,13 +1,18 @@
-import blessed from 'blessed';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { OpenAI } from 'openai';
-import { Command } from 'commander';
+import blessed from "blessed";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { OpenAI } from "openai";
+import { Command } from "commander";
 
-const SERVER_CMD = 'npx';
-const SERVER_ARGS = ['tsx', 'src/mcp/server.ts'];
-const DEFAULT_FOCUS_BASE = 'https://example.org/guardian#';
-const MODEL = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
+const SERVER_CMD = "npx";
+const SERVER_ARGS = ["tsx", "src/mcp/server.ts"];
+const DEFAULT_FOCUS_BASE = "https://example.org/guardian#";
+const DEFAULT_CLASS = `${DEFAULT_FOCUS_BASE}Person`;
+const MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+const MAX_STEPS = 6;
+const MAX_CLASSES = 5;
+const MAX_NODES = 20;
+const MAX_EDGES_PER_NODE = 200;
 
 function iriFromName(name: string): string {
   return `${DEFAULT_FOCUS_BASE}${name}`;
@@ -22,7 +27,7 @@ function firstText(res: any): string | undefined {
   const content = (res as any)?.content;
   if (!Array.isArray(content)) return undefined;
   const first = content[0] as any;
-  return typeof first?.text === 'string' ? first.text : undefined;
+  return typeof first?.text === "string" ? first.text : undefined;
 }
 
 function safeJson(text?: string): any {
@@ -34,156 +39,342 @@ function safeJson(text?: string): any {
   }
 }
 
-async function plan(question: string): Promise<{ tool: string; args: Record<string, unknown> }> {
+type Edge = {
+  p: string;
+  o: string;
+  type: "iri" | "literal";
+  datatype?: string;
+  lang?: string;
+};
+type NodeFact = {
+  iri: string;
+  edges: Edge[];
+  complete_outgoing: boolean;
+  edges_truncated: boolean;
+};
+type Facts = {
+  focus: string;
+  nodes: NodeFact[];
+  classes: string[];
+  steps: string[];
+};
+
+type PlannerAction =
+  | { action: "listClasses"; args?: { limit?: number } }
+  | { action: "listIriByClass"; args: { classIri: string; limit?: number } }
+  | { action: "open_and_moves"; args: { focusIri: string; maxEdges?: number } }
+  | { action: "answer"; args?: Record<string, unknown> };
+
+async function planner(
+  question: string,
+  summary: {
+    classes: string[];
+    nodes: number;
+    pending: number;
+    stepsTaken: number;
+  },
+): Promise<PlannerAction> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return { tool: 'open_and_moves', args: { focusIri: iriFromName('Alice') } };
+    // Fallback: explore persons then answer
+    if (summary.stepsTaken === 0)
+      return {
+        action: "listIriByClass",
+        args: { classIri: DEFAULT_CLASS, limit: MAX_NODES },
+      };
+    return { action: "answer", args: {} };
   }
 
   const client = new OpenAI({ apiKey });
-  const system = `You are a planner that chooses ONE MCP tool to call. Output ONLY JSON like {"tool":"open_and_moves","args":{"focusIri":"https://example.org/guardian#Alice"}}.
-Allowed tools:
-- open_and_moves: args focusIri (IRI string)
-- listClasses: args limit (int optional)
-- listIriByClass: args classIri (IRI string), limit (int optional)
-- ping: args {}
-No free-form text. No extra fields.`;
+  const system = `You are a planner that chooses the NEXT MCP tool call. Always output ONLY JSON: {"action":"...","args":{...}}.
+Allowed actions:
+- listClasses(limit?): discover class IRIs. Prefer ${DEFAULT_CLASS}.
+- listIriByClass(classIri, limit?): get IRIs of that class (use limits to respect caps).
+- open_and_moves(focusIri, maxEdges?): fetch outgoing edges for a node.
+- answer: stop planning; proceed to final answer.
+
+Constraints:
+- Hard caps: max classes ${MAX_CLASSES}, max nodes ${MAX_NODES}, max edges per node ${MAX_EDGES_PER_NODE}.
+- Plan within ${MAX_STEPS} steps total.
+- Prefer focusing on ${DEFAULT_CLASS} first, then fetching edges for each person until caps.
+`;
 
   const user = `Question: ${question}
-Default focus candidates: Alice, Bob, Carol, Dave (guardian namespace). If asking about relationships of a person, pick open_and_moves with that person's IRI.`;
+Current summary: classes=${summary.classes.length}, nodes=${summary.nodes}, pending=${summary.pending}, stepsTaken=${summary.stepsTaken}.
+Return the next action only.`;
 
   const resp = await client.chat.completions.create({
     model: MODEL,
     messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user }
+      { role: "system", content: system },
+      { role: "user", content: user },
     ],
-    temperature: 0
+    temperature: 0,
   });
 
   const text = resp.choices[0]?.message?.content?.trim();
   const parsed = safeJson(text);
-  if (parsed && typeof parsed.tool === 'string' && parsed.args) return parsed as any;
-  return { tool: 'open_and_moves', args: { focusIri: iriFromName('Alice') } };
+  if (
+    parsed &&
+    typeof parsed.action === "string" &&
+    (parsed.action === "answer" ||
+      parsed.action === "listClasses" ||
+      parsed.action === "listIriByClass" ||
+      parsed.action === "open_and_moves")
+  ) {
+    return parsed as PlannerAction;
+  }
+  // fallback
+  return { action: "answer", args: {} };
 }
 
-async function answerWithLLM(question: string, facts: any): Promise<string> {
+async function answerWithLLM(
+  question: string,
+  facts: Facts,
+  log: (s: string) => void,
+): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return `No OPENAI_API_KEY set; facts: ${JSON.stringify(facts, null, 2)}`;
+  if (!apiKey) return "No OPENAI_API_KEY set";
 
   const oa = new OpenAI({ apiKey });
-  const system = `You are a concise assistant. Answer the user question using ONLY the provided facts. Do not invent data. If the facts do not contain the answer, say you cannot determine from the provided facts.`;
-  const userContent = `Question: ${question}\nFacts: ${JSON.stringify(facts, null, 2)}`;
+  const system = `You are a constrained RDF-facts interpreter.
+You will receive:
+- A user question.
+- FACTS JSON: bounded nodes with outgoing edges, and completeness flags.
+Rules:
+1) Use ONLY nodes/edges in FACTS. Do not assume missing nodes.
+2) For a node: if complete_outgoing=true AND edges_truncated=false, then predicates not listed are FALSE for that node. Otherwise missing predicates are UNKNOWN.
+3) If needed info is UNKNOWN or nodes are missing, answer UNKNOWN.
+4) IRIs are opaque; do not fabricate labels.
+5) Be concise.
+
+Output format (no extra text):
+- JSON: {"status":"certain|unknown",  "debug?": <provide explanation if status unknown>, "answer":<boolean|string|array>,"evidence":[{"s":iri,"p":iri,"o":iri}...,]}
+- evidence must cite only edges from FACTS. If status=unknown, evidence may be empty.
+
+`;
+  const userContent = `Question: ${question}\nFACTS:${JSON.stringify(facts, null, 2)}`;
+  log("LLM input prepared");
   const resp = await oa.chat.completions.create({
     model: MODEL,
     messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: userContent }
+      { role: "system", content: system },
+      { role: "user", content: userContent },
     ],
-    temperature: 0
+    temperature: 0,
   });
-  return resp.choices[0]?.message?.content?.trim() ?? 'No answer';
+  const ans = resp.choices[0]?.message?.content?.trim() ?? "No answer";
+  log(`LLM output: ${ans.substring(0, 200)}${ans.length > 200 ? "..." : ""}`);
+  return ans;
 }
 
-async function run(question: string, log: (line: string) => void): Promise<string> {
+async function run(
+  question: string,
+  log: (line: string) => void,
+): Promise<{ facts: string; llm: string }> {
   log(`Question: ${question}`);
 
-  const planResult = await plan(question);
-  const focusIri = typeof planResult.args?.focusIri === 'string' ? planResult.args.focusIri : iriFromName('Alice');
-  log(`Planner chose focus: ${focusIri}`);
-
-  const transport = new StdioClientTransport({ command: SERVER_CMD, args: SERVER_ARGS, stderr: 'ignore' });
-  const client = new Client({ name: 'guardian-zipper-client', version: '0.1.0' });
+  const transport = new StdioClientTransport({
+    command: SERVER_CMD,
+    args: SERVER_ARGS,
+    stderr: "ignore",
+  });
+  const client = new Client({
+    name: "guardian-zipper-client",
+    version: "0.1.0",
+  });
   await client.connect(transport);
-  log('Connected to MCP server');
+  log("Connected to MCP server");
 
-  const openRes = await client.callTool({ name: 'open', arguments: { focusIri } });
-  const openData = safeJson(firstText(openRes));
-  const cursorId = openData?.cursorId;
-  if (!cursorId) throw new Error('cursorId missing from open response');
-  log(`Opened cursor: ${cursorId}`);
+  const classes: string[] = [];
+  const nodes = new Map<string, NodeFact>();
+  const queue: string[] = [];
+  const steps: string[] = [];
 
-  const movesRes = await client.callTool({ name: 'moves', arguments: { cursorId } });
-  const movesData = safeJson(firstText(movesRes));
-  const moves = Array.isArray(movesData?.moves) ? movesData.moves : [];
-  log(`Moves retrieved: ${moves.length}`);
-  if (moves.length) {
-    log('Moves detail:');
-    log(JSON.stringify(moves, null, 2));
+  const enqueueNode = (iri: string) => {
+    if (
+      !nodes.has(iri) &&
+      !queue.includes(iri) &&
+      nodes.size + queue.length < MAX_NODES
+    ) {
+      queue.push(iri);
+    }
+  };
+
+  // seed focus
+  enqueueNode(iriFromName("Alice"));
+
+  const addEdges = (iri: string, moves: any[], maxEdges: number) => {
+    const edges: Edge[] = moves.map((m: any) => {
+      if (m.kind === "follow")
+        return { p: m.predicateIri, o: m.objectIri, type: "iri" };
+      const obj = m.object;
+      return {
+        p: m.predicateIri,
+        o: obj.value,
+        type: "literal",
+        datatype: obj.datatype,
+        lang: obj["xml:lang"],
+      };
+    });
+    const truncated = moves.length >= maxEdges;
+    nodes.set(iri, {
+      iri,
+      edges,
+      complete_outgoing: !truncated,
+      edges_truncated: truncated,
+    });
+  };
+
+  const callListClasses = async () => {
+    const resp = await client.callTool({
+      name: "listClasses",
+      arguments: { limit: MAX_CLASSES },
+    });
+    const data = safeJson(firstText(resp));
+    const found = Array.isArray(data?.classes)
+      ? data.classes.slice(0, MAX_CLASSES)
+      : [];
+    found.forEach((c: string) => {
+      if (!classes.includes(c) && classes.length < MAX_CLASSES) classes.push(c);
+    });
+    steps.push(`listClasses -> ${found.length}`);
+    log(`listClasses found ${found.length}`);
+  };
+
+  const callListIriByClass = async (classIri: string) => {
+    const resp = await client.callTool({
+      name: "listIriByClass",
+      arguments: { classIri, limit: MAX_NODES },
+    });
+    const data = safeJson(firstText(resp));
+    const items = Array.isArray(data?.items) ? data.items : [];
+    items.forEach((it: any) => enqueueNode(it.iri));
+    steps.push(`listIriByClass(${lastSegment(classIri)}) -> ${items.length}`);
+    log(`listIriByClass ${classIri} => ${items.length}`);
+  };
+
+  const callOpenAndMoves = async (focusIri: string, maxEdges: number) => {
+    const openRes = await client.callTool({
+      name: "open",
+      arguments: { focusIri, maxEdges },
+    });
+    const openData = safeJson(firstText(openRes));
+    const cursorId = openData?.cursorId;
+    if (!cursorId) throw new Error("cursorId missing from open response");
+    const movesRes = await client.callTool({
+      name: "moves",
+      arguments: { cursorId },
+    });
+    const movesData = safeJson(firstText(movesRes));
+    const moves = Array.isArray(movesData?.moves) ? movesData.moves : [];
+    addEdges(focusIri, moves, maxEdges);
+    steps.push(`open_and_moves(${lastSegment(focusIri)}) -> ${moves.length}`);
+    log(`open_and_moves ${focusIri} => ${moves.length}`);
+  };
+
+  // Planner loop
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const summary = {
+      classes,
+      nodes: nodes.size,
+      pending: queue.length,
+      stepsTaken: step,
+    };
+    const action = await planner(question, summary);
+    if (action.action === "answer") {
+      steps.push("planner -> answer");
+      log("Planner chose answer");
+      break;
+    }
+    if (action.action === "listClasses") {
+      await callListClasses();
+    } else if (action.action === "listIriByClass") {
+      const classIri = action.args?.classIri ?? DEFAULT_CLASS;
+      await callListIriByClass(String(classIri));
+    } else if (action.action === "open_and_moves") {
+      const target = String(
+        action.args?.focusIri ?? queue.shift() ?? iriFromName("Alice"),
+      );
+      const maxEdges = Math.min(
+        Number(action.args?.maxEdges ?? MAX_EDGES_PER_NODE) ||
+          MAX_EDGES_PER_NODE,
+        MAX_EDGES_PER_NODE,
+      );
+      await callOpenAndMoves(target, maxEdges);
+    }
   }
 
-  const parents = Array.from(
-    new Set(
-      moves
-        .filter((m: any) => m.predicateIri === `${DEFAULT_FOCUS_BASE}hasParent` && m.objectIri)
-        .map((m: any) => m.objectIri as string)
-    )
-  );
-  const ancestors = Array.from(
-    new Set(
-      moves
-        .filter((m: any) => m.predicateIri === `${DEFAULT_FOCUS_BASE}hasAncestor` && m.objectIri)
-        .map((m: any) => m.objectIri as string)
-    )
-  );
+  // If nothing fetched, do a minimal sweep over default class
+  if (nodes.size === 0) {
+    await callListIriByClass(DEFAULT_CLASS);
+    while (queue.length && nodes.size < MAX_NODES) {
+      const iri = queue.shift()!;
+      await callOpenAndMoves(iri, MAX_EDGES_PER_NODE);
+    }
+  }
 
-  log(`Parents: ${parents.map((p) => lastSegment(String(p))).join(', ') || 'none'}`);
-  log(`Ancestors: ${ancestors.map((a) => lastSegment(String(a))).join(', ') || 'none'}`);
+  const factsObj: Facts = {
+    focus: queue[0] ?? iriFromName("Alice"),
+    nodes: Array.from(nodes.values()),
+    classes,
+    steps,
+  };
 
-  const facts = { focus: focusIri, parents, ancestors };
-  const answer = await answerWithLLM(question, facts);
+  const facts = JSON.stringify(factsObj, null, 2);
+  const llm = await answerWithLLM(question, factsObj, log);
 
   await client.close();
-  log('Closed MCP client');
-  return answer;
+  log("Closed MCP client");
+  return { facts, llm };
 }
 
 async function main(): Promise<void> {
   const program = new Command();
-  program.option('-q, --question <text>', 'Natural language question');
+  program.option("-q, --question <text>", "Natural language question");
   program.parse(process.argv);
-  const { question = '' } = program.opts<{ question?: string }>();
+  const { question = "" } = program.opts<{ question?: string }>();
 
-  const screen = blessed.screen({ smartCSR: true, title: 'MCP Ask TUI' });
+  const screen = blessed.screen({ smartCSR: true, title: "MCP Ask TUI" });
   const logBox = blessed.box({
-    label: 'Steps',
+    label: "Steps",
     top: 0,
     left: 0,
-    width: '70%',
-    height: '100%-3',
+    width: "70%",
+    height: "100%-3",
     tags: true,
-    border: 'line',
+    border: "line",
     scrollable: true,
     alwaysScroll: true,
     keys: true,
     mouse: true,
     vi: true,
-    scrollbar: { ch: ' ' }
+    scrollbar: { ch: " " },
   });
 
   const answerBox = blessed.box({
-    label: 'Answer',
+    label: "Answer",
     top: 0,
     right: 0,
-    width: '30%',
-    height: '100%-3',
+    width: "30%",
+    height: "100%-3",
     tags: true,
-    border: 'line',
+    border: "line",
     scrollable: true,
     keys: true,
     mouse: true,
     vi: true,
-    scrollbar: { ch: ' ' }
+    scrollbar: { ch: " " },
   });
 
   const input = blessed.textbox({
     bottom: 0,
     left: 0,
-    width: '100%',
+    width: "100%",
     height: 3,
     inputOnFocus: true,
-    border: 'line',
-    label: 'Question (Enter to run, q to quit)'
+    border: "line",
+    label: "Question (Enter to run, q to quit)",
   });
 
   screen.append(logBox);
@@ -192,28 +383,30 @@ async function main(): Promise<void> {
 
   let lines: string[] = [];
   const log = (line: string) => {
-    const time = new Date().toISOString().split('T')[1].replace('Z', '');
+    const time = new Date().toISOString().split("T")[1].replace("Z", "");
     lines.push(`{gray-fg}[${time}]{/gray-fg} ${line}`);
-    logBox.setContent(lines.join('\n'));
+    logBox.setContent(lines.join("\n"));
     logBox.setScrollPerc(100);
     screen.render();
   };
 
-  screen.key(['q', 'C-c'], () => process.exit(0));
+  const quit = () => process.exit(0);
+  screen.key(["q", "C-c"], quit);
+  input.key(["q", "C-c"], quit);
 
   let running = false;
   const runQuestion = async (q: string) => {
     if (running) return;
     running = true;
     lines = [];
-    logBox.setContent('');
-    answerBox.setContent('');
+    logBox.setContent("");
+    answerBox.setContent("");
     screen.render();
     try {
-      log('Starting...');
-      const answer = await run(q, log);
-      answerBox.setContent(answer);
-      log('Done');
+      log("Starting...");
+      const { facts, llm } = await run(q, log);
+      answerBox.setContent(`Facts (no heuristics):\n${facts}\n\nLLM:\n${llm}`);
+      log("Done");
     } catch (err: any) {
       answerBox.setContent(`Error: ${err?.message ?? err}`);
       log(`Error: ${err?.message ?? err}`);
@@ -223,8 +416,8 @@ async function main(): Promise<void> {
     }
   };
 
-  input.on('submit', async (value) => {
-    const q = String(value || '').trim();
+  input.on("submit", async (value) => {
+    const q = String(value || "").trim();
     input.clearValue();
     input.focus();
     if (!q) return;

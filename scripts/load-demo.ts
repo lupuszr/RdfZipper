@@ -55,8 +55,6 @@ PREFIX owl: <http://www.w3.org/2002/07/owl#>
 INSERT DATA {
   :hasParent rdfs:subPropertyOf :hasAncestor .
   :hasAncestor rdf:type owl:TransitiveProperty .
-  :Alice :hasParent :Bob .
-  :Bob   :hasParent :Dave .
 }`;
 
 await bg.update(testA);
