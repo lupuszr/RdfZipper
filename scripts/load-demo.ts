@@ -25,9 +25,10 @@ INSERT DATA {
 
   # instances
   :Alice a :Person ; :age 30 ; :hasSpouse :Bob ; :hasParent :Carol ; :hasPet :Fido .
-  :Bob   a :Person ; :age 32 ; :hasSpouse :Alice ; :hasParent :Dave  ; :hasPet :Hank .
-  :Carol a :Person ; :age 55 .
-  :Dave  a :Person ; :age 60 .
+:Bob   a :Person ; :age 32 ; :hasSpouse :Alice ; :hasParent :Dave  ; :hasPet :Hank .
+:Carol a :Person ; :age 55 ; :hasParent :Dave .
+:Dave  a :Person ; :age 60 .
+
 
   :Fido a :Animal ; :barks true ; :speciesName "dog" .
   :Hank a :Animal ; :barks true ; :speciesName "hyena" .
@@ -36,6 +37,31 @@ INSERT DATA {
 
 await bg.update('CLEAR ALL');
 await bg.update(insert);
+
+const testA = `
+PREFIX :    <https://example.org/guardian#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#>
+INSERT DATA {
+  :Student rdfs:subClassOf :Person .
+  :John rdf:type :Student .
+}`;
+
+const testB = `
+PREFIX :    <https://example.org/guardian#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+INSERT DATA {
+  :hasParent rdfs:subPropertyOf :hasAncestor .
+  :hasAncestor rdf:type owl:TransitiveProperty .
+  :Alice :hasParent :Bob .
+  :Bob   :hasParent :Dave .
+}`;
+
+await bg.update(testA);
+await bg.update(testB);
+await bg.update('CREATE ENTAILMENTS');
 
 console.log('OK: loaded demo triples into Blazegraph');
 console.log('Tip: run `npm run tui` (default focus is https://example.org/guardian#Alice)');

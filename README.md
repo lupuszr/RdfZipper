@@ -26,26 +26,29 @@ npm run blazegraph:up
 http://localhost:8889/blazegraph/namespace/kb/sparql
 ```
 
-
 Apple Silicon (M1/M2/M3) users: the official Blazegraph image is amd64-only. The compose file pins `platform: linux/amd64`, so Docker Desktop will use emulation automatically. If you prefer per-command, run:
 
 ```bash
 DOCKER_DEFAULT_PLATFORM=linux/amd64 npm run blazegraph:up
 ```
 
-Blazegraph should be reachable at:
-
-```
-http://localhost:8889/blazegraph/namespace/kb/sparql
-```
-
-## 2) Load demo data
+## 2) Load demo data + entailments
 
 ```bash
 npm run demo:load
 ```
 
-## 3) Run the TUI
+## 3) Inference smoke test
+
+```bash
+./scripts/inference_smoke_test.sh
+```
+
+If it fails with a namespace mismatch, delete any persisted Blazegraph journal/volume and recreate the namespace (the properties must match the expected axioms/quads/truthMaintenance settings).
+
+## 4) Run the TUI
+
+The default allowlist now includes the inference predicates (`urn:test#hasAncestor`, `urn:test#hasParent`) so inferred ancestor edges are visible when you navigate.
 
 ```bash
 npm run tui
