@@ -69,14 +69,19 @@ Default focus candidates: Alice, Bob, Carol, Dave (guardian namespace). If askin
 
 async function main(): Promise<void> {
   const program = new Command();
-  program.requiredOption('-q, --question <text>', 'Natural language question');
+  program.option('-q, --question <text>', 'Natural language question');
   program.parse(process.argv);
-  const { question } = program.opts<{ question: string }>();
+  const { question = '' } = program.opts<{ question?: string }>();
+
+  if (!question.trim()) {
+    console.error('Please provide a question with -q/--question (e.g., "Who is the father of Alice?")');
+    process.exit(1);
+  }
 
   const planResult = await plan(question);
   const focusIri = typeof planResult.args?.focusIri === 'string' ? planResult.args.focusIri : iriFromName('Alice');
 
-  const transport = new StdioClientTransport({ command: SERVER_CMD, args: SERVER_ARGS });
+  const transport = new StdioClientTransport({ command: SERVER_CMD, args: SERVER_ARGS, stderr: 'ignore' });
   const client = new Client({ name: 'guardian-zipper-client', version: '0.1.0' });
   await client.connect(transport);
 

@@ -13,7 +13,8 @@
     "demo:clear": "tsx scripts/clear-all.ts",
     "tui": "tsx src/tui.ts",
     "mcp:server": "tsx src/mcp/server.ts",
-    "mcp:ask": "tsx scripts/mcp-ask.ts"
+    "mcp:ask": "tsx scripts/mcp-ask.ts",
+    "mcp:ask:tui": "tsx scripts/mcp-ask-tui.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",

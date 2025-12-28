@@ -60,8 +60,18 @@ Exposes zipper-only tools: `open`, `moves`/`refresh`, `applyFollow`, `back`, `li
 npm run mcp:ask -- --question "Who is the grandfather of Alice?"
 ```
 
+(Required flag: provide a question.)
 - Uses a tiny planner: if `OPENAI_API_KEY` is set, it asks the LLM to pick the MCP tool/args and to phrase the answer from extracted facts; otherwise it falls back to a deterministic plan and prints the facts (parents/ancestors).
 - Traverses via MCP tools only; no direct SPARQL.
+
+### MCP ask TUI
+
+```bash
+npm run mcp:ask:tui -- --question "Who is the father of Alice?"
+```
+
+Question flag is optional; you can also launch and type a question in the TUI input.
+Shows steps (tool calls, extracted facts) and the final answer (LLM-formatted if `OPENAI_API_KEY` is set; otherwise prints facts).
 
 ## 6) Run the TUI
 
