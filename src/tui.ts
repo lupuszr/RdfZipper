@@ -17,7 +17,9 @@ const DEFAULT_ALLOWED = [
   'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
   'https://example.org/guardian#hasAncestor',
   'https://example.org/guardian#hasDescendant',
-  'https://example.org/guardian#hasParent'
+  'https://example.org/guardian#hasParent',
+  'https://example.org/guardian#livesIn',
+  'https://example.org/guardian#hasResident'
 ];
 
 

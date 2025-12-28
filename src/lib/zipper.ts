@@ -98,6 +98,12 @@ export class ZipperEngine {
           BIND(?s AS ?o)
           ${filter}
         }
+        UNION
+        {
+          ?s ?p <${cursor.focusIri}> .
+          FILTER(?p != <${rdfTypeIri}>)
+          ${filter}
+        }
       }
       ORDER BY STR(?p) STR(?o)
       LIMIT ${cursor.maxEdges}

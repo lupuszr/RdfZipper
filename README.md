@@ -5,6 +5,26 @@ This POC demonstrates a **zipper-style deterministic graph browser** over an RDF
 - All navigation is **bounded + deterministic** (stable ordering, caps).
 - The UI only lets you choose from enumerated next moves (no free-form SPARQL).
 
+## Architecture
+```
++-------------+        +------------------+        +-----------------------+
+|    User     |<------>|  TUI / MCP Ask   |<------>|   MCP Server (stdio)  |
+| (CLI input) |        |   (planner+LLM)  |        |  + Zipper engine      |
++-------------+        +------------------+        |  + Blazegraph client  |
+                            ^     |                +----------+------------+
+                            |     |                           |
+                            |     v                           v
+                        (optional LLM)                 +---------------+
+                                                      |  Blazegraph   |
+                                                      |  (Docker, OWL |
+                                                      |   entailment) |
+                                                      +---------------+
+```
+- **Blazegraph**: local Docker service with OWL/RDFS entailment.
+- **MCP server**: exposes zipper tools (`open`, `moves`, etc.) over stdio.
+- **TUI / MCP Ask**: gathers bounded facts via MCP tools; optionally asks an LLM to phrase the answer.
+- **User**: navigates deterministically or asks questions; no raw SPARQL exposed.
+
 ## Requirements
 - Node.js >= 18
 - Docker + Docker Compose

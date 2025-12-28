@@ -69,5 +69,8 @@ ask 'ASK { <https://example.org/guardian#Alice> <https://example.org/guardian#ha
 ask 'ASK { <https://example.org/guardian#Alice> <https://example.org/guardian#hasAncestor> <https://example.org/guardian#Eve> }' false
 ask 'ASK { <https://example.org/guardian#Dave> <https://example.org/guardian#hasDescendant> <https://example.org/guardian#Alice> }' true
 ask 'ASK { <https://example.org/guardian#Eve> <https://example.org/guardian#hasDescendant> <https://example.org/guardian#Alice> }' false
+ask 'ASK { <https://example.org/guardian#Riverford> <https://example.org/guardian#hasResident> <https://example.org/guardian#Alice> }' true
+ask 'ASK { <https://example.org/guardian#Riverford> <https://example.org/guardian#hasResident> <https://example.org/guardian#Bob> }' true
+ask 'ASK { <https://example.org/guardian#Seaview> <https://example.org/guardian#hasResident> <https://example.org/guardian#Alice> }' false
 
 echo "OK: inference smoke test passed"

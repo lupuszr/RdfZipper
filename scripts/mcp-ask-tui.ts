@@ -10,9 +10,11 @@ const DEFAULT_FOCUS_BASE = "https://example.org/guardian#";
 const DEFAULT_CLASS = `${DEFAULT_FOCUS_BASE}Person`;
 const MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 const MAX_STEPS = 6;
-const MAX_CLASSES = 5;
-const MAX_NODES = 20;
+const MAX_CLASSES = 10;
+const MAX_NODES = 30;
 const MAX_EDGES_PER_NODE = 200;
+
+
 
 function iriFromName(name: string): string {
   return `${DEFAULT_FOCUS_BASE}${name}`;
@@ -76,8 +78,9 @@ async function planner(
 ): Promise<PlannerAction> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    // Fallback: explore persons then answer
-    if (summary.stepsTaken === 0)
+    // Fallback: first discover classes, then list default class IRIs, then answer
+    if (summary.stepsTaken === 0) return { action: "listClasses", args: { limit: MAX_CLASSES } };
+    if (summary.stepsTaken === 1)
       return {
         action: "listIriByClass",
         args: { classIri: DEFAULT_CLASS, limit: MAX_NODES },
@@ -88,15 +91,15 @@ async function planner(
   const client = new OpenAI({ apiKey });
   const system = `You are a planner that chooses the NEXT MCP tool call. Always output ONLY JSON: {"action":"...","args":{...}}.
 Allowed actions:
-- listClasses(limit?): discover class IRIs. Prefer ${DEFAULT_CLASS}.
-- listIriByClass(classIri, limit?): get IRIs of that class (use limits to respect caps).
+- listClasses(limit?): discover class IRIs.
+- listIriByClass(classIri, limit?): get IRIs of that class (use limits to respect caps). Default class: ${DEFAULT_CLASS}.
 - open_and_moves(focusIri, maxEdges?): fetch outgoing edges for a node.
 - answer: stop planning; proceed to final answer.
 
 Constraints:
 - Hard caps: max classes ${MAX_CLASSES}, max nodes ${MAX_NODES}, max edges per node ${MAX_EDGES_PER_NODE}.
 - Plan within ${MAX_STEPS} steps total.
-- Prefer focusing on ${DEFAULT_CLASS} first, then fetching edges for each person until caps.
+- Aim to cover multiple classes (people, animals, etc.) within caps.
 `;
 
   const user = `Question: ${question}
@@ -201,13 +204,13 @@ async function run(
     }
   };
 
-  // seed focus
-  enqueueNode(iriFromName("Alice"));
+  // no default seed; planner will decide what to explore
 
   const addEdges = (iri: string, moves: any[], maxEdges: number) => {
     const edges: Edge[] = moves.map((m: any) => {
-      if (m.kind === "follow")
+      if (m.kind === "follow") {
         return { p: m.predicateIri, o: m.objectIri, type: "iri" };
+      }
       const obj = m.object;
       return {
         p: m.predicateIri,
@@ -293,29 +296,39 @@ async function run(
       const classIri = action.args?.classIri ?? DEFAULT_CLASS;
       await callListIriByClass(String(classIri));
     } else if (action.action === "open_and_moves") {
-      const target = String(
-        action.args?.focusIri ?? queue.shift() ?? iriFromName("Alice"),
-      );
-      const maxEdges = Math.min(
-        Number(action.args?.maxEdges ?? MAX_EDGES_PER_NODE) ||
+      const target = action.args?.focusIri
+        ? String(action.args.focusIri)
+        : queue.shift();
+      if (target) {
+        const maxEdges = Math.min(
+          Number(action.args?.maxEdges ?? MAX_EDGES_PER_NODE) ||
+            MAX_EDGES_PER_NODE,
           MAX_EDGES_PER_NODE,
-        MAX_EDGES_PER_NODE,
-      );
-      await callOpenAndMoves(target, maxEdges);
+        );
+        await callOpenAndMoves(target, maxEdges);
+      } else {
+        log("open_and_moves skipped (no target)");
+      }
     }
   }
 
-  // If nothing fetched, do a minimal sweep over default class
-  if (nodes.size === 0) {
-    await callListIriByClass(DEFAULT_CLASS);
-    while (queue.length && nodes.size < MAX_NODES) {
-      const iri = queue.shift()!;
-      await callOpenAndMoves(iri, MAX_EDGES_PER_NODE);
-    }
+  // Always do a bounded sweep over discovered (or default) classes to fill context
+  if (!classes.length) {
+    await callListClasses();
+  }
+  const classList = classes.length ? classes : [DEFAULT_CLASS];
+  for (const c of classList) {
+    if (nodes.size + queue.length >= MAX_NODES) break;
+    await callListIriByClass(c);
+  }
+  while (queue.length && nodes.size < MAX_NODES) {
+    const iri = queue.shift()!;
+    await callOpenAndMoves(iri, MAX_EDGES_PER_NODE);
   }
 
+  const firstNode = nodes.size ? Array.from(nodes.values())[0] : undefined;
   const factsObj: Facts = {
-    focus: queue[0] ?? iriFromName("Alice"),
+    focus: firstNode?.iri ?? "",
     nodes: Array.from(nodes.values()),
     classes,
     steps,
