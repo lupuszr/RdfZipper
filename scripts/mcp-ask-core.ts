@@ -59,12 +59,12 @@ type Facts = {
 type PlannerAction =
   | { action: "listClasses"; args?: { limit?: number } }
   | { action: "listIriByClass"; args: { classIri: string; limit?: number } }
-  | { action: "open_and_moves"; args: { focusIri: string; maxEdges?: number } }
+  | { action: "open_and_moves"; args: { focusIri?: string; maxEdges?: number } }
   | { action: "answer"; args?: Record<string, unknown> };
 
 async function planner(
   question: string,
-  summary: { classes: string[]; nodes: number; pending: number; stepsTaken: number },
+  summary: { classes: string[]; nodes: number; pending: number; stepsTaken: number; recentActions: string[] },
 ): Promise<PlannerAction> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -77,18 +77,21 @@ async function planner(
 
   const client = new OpenAI({ apiKey });
   const system = `You are a planner that chooses the NEXT MCP tool call. Output ONLY JSON: {"action":"...","args":{...}}.
-Allowed actions:
-- listClasses(limit?): discover class IRIs.
-- listIriByClass(classIri, limit?): get IRIs of that class (use limits to respect caps). Default class: ${DEFAULT_CLASS}.
-- open_and_moves(focusIri, maxEdges?): fetch outgoing edges for a node.
-- answer: stop planning; proceed to final answer.
-Constraints:
+Available MCP tools (actions map 1:1 to tool calls):
+- listClasses(limit?): returns JSON with a "classes" array of IRIs.
+- listIriByClass(classIri, limit?): returns JSON with an "items" array; each item has an iri of that class. Default class: ${DEFAULT_CLASS}.
+- open_and_moves(focusIri, maxEdges?): runs MCP open then moves to fetch outgoing edges from that node; "follow" moves carry predicateIri/objectIri.
+- answer: stop planning and hand off to the answering step.
+Constraints and guidance:
 - Hard caps: max classes ${MAX_CLASSES}, max nodes ${MAX_NODES}, max edges per node ${MAX_EDGES_PER_NODE}.
 - Plan within ${MAX_STEPS} steps total.
-- Aim to cover multiple classes (people, animals, etc.) within caps.
+- Do NOT repeat listClasses once classes are populated, unless you expect new classes.
+- Avoid calling listIriByClass on the same class twice; move on to opens.
+- If there is a non-empty pending queue, prefer open_and_moves until drained or caps reached.
+- Stop early with answer if no further useful calls remain.
 `;
   const user = `Question: ${question}
-Current summary: classes=${summary.classes.length}, nodes=${summary.nodes}, pending=${summary.pending}, stepsTaken=${summary.stepsTaken}.
+Current summary: classes=${summary.classes.length}, nodes=${summary.nodes}, pending=${summary.pending}, stepsTaken=${summary.stepsTaken}, recentActions=${summary.recentActions.join(";")}.
 Return the next action only.`;
 
   const resp = await client.chat.completions.create({
@@ -127,9 +130,10 @@ You will receive:
 Rules:
 1) Use ONLY nodes/edges in FACTS. Do not assume missing nodes.
 2) For a node: if complete_outgoing=true AND edges_truncated=false, then predicates not listed are FALSE for that node. Otherwise missing predicates are UNKNOWN.
-3) If needed info is UNKNOWN or nodes are missing, answer UNKNOWN.
-4) IRIs are opaque; do not fabricate labels.
-5) Be concise.
+3) Chain edges aggressively to answer relational questions, but only when the chain is coherent for the SAME entities. Example: to find pets in a City, require City hasResident Person AND that Person hasPet Animal; then the Animal counts as in that City and you must cite BOTH edges. Apply similar chaining for spouses/parents/descendants when implied.
+4) If needed info is UNKNOWN or nodes are missing, answer UNKNOWN.
+5) IRIs are opaque; do not fabricate labels.
+6) Be concise.
 Output format (no extra text):
 - JSON: {"status":"certain|unknown", "debug?": <explain if unknown>, "answer":<boolean|string|array>,"evidence":[{"s":iri,"p":iri,"o":iri}...]}
 - evidence must cite only edges from FACTS. If status=unknown, evidence may be empty.
@@ -161,13 +165,22 @@ export async function runAsk(question: string, log: (s: string) => void) {
   log("Connected to MCP server");
 
   const classes: string[] = [];
+  const listedClasses = new Set<string>();
   const nodes = new Map<string, NodeFact>();
   const queue: string[] = [];
   const steps: string[] = [];
+  const actionHistory: string[] = [];
 
-  const enqueueNode = (iri: string) => {
+  const questionLc = question.toLowerCase();
+  const matchesQuestion = (iri: string) => questionLc.includes(lastSegment(iri).toLowerCase());
+
+  const enqueueNode = (iri: string, priority = false) => {
     if (!nodes.has(iri) && !queue.includes(iri) && nodes.size + queue.length < MAX_NODES) {
-      queue.push(iri);
+      if (priority) {
+        queue.unshift(iri);
+      } else {
+        queue.push(iri);
+      }
     }
   };
 
@@ -205,7 +218,8 @@ export async function runAsk(question: string, log: (s: string) => void) {
     const resp = await client.callTool({ name: "listIriByClass", arguments: { classIri: normClass, limit: SERVER_LIST_LIMIT } });
     const data = safeJson(firstText(resp));
     const items = Array.isArray(data?.items) ? data.items : [];
-    items.forEach((it: any) => enqueueNode(it.iri));
+    items.forEach((it: any) => enqueueNode(it.iri, matchesQuestion(it.iri)));
+    listedClasses.add(normClass);
     const msg = `listIriByClass(${normClass}) -> ${items.length}`;
     steps.push(msg);
     log(msg);
@@ -227,13 +241,39 @@ export async function runAsk(question: string, log: (s: string) => void) {
 
   // Planner loop
   for (let step = 0; step < MAX_STEPS; step++) {
-    const summary = { classes, nodes: nodes.size, pending: queue.length, stepsTaken: step };
-    const action = await planner(question, summary);
+    const summary = { classes, nodes: nodes.size, pending: queue.length, stepsTaken: step, recentActions: actionHistory.slice(-5) };
+    let action = await planner(question, summary);
+    const lastAction = actionHistory[actionHistory.length - 1];
+
+    const overrideToOpenOrAnswer = (reason: string): void => {
+      const fallback: PlannerAction["action"] = queue.length ? "open_and_moves" : "answer";
+      steps.push(`planner override (${reason}) -> ${fallback}`);
+      log(`planner override (${reason}) -> ${fallback}`);
+      action = fallback === "open_and_moves" ? { action: "open_and_moves", args: {} } : { action: "answer", args: {} };
+    };
+
+    if (action.action === "listClasses" && classes.length > 0) {
+      overrideToOpenOrAnswer("listClasses already done");
+    }
+
+    if (action.action === "listIriByClass") {
+      const classIri = String(action.args?.classIri ?? DEFAULT_CLASS);
+      if (listedClasses.has(classIri)) {
+        overrideToOpenOrAnswer(`class already listed ${classIri}`);
+      }
+    }
+
+    if (lastAction === action.action && action.action !== "open_and_moves") {
+      overrideToOpenOrAnswer("repeat action");
+    }
+
     if (action.action === "answer") {
       steps.push("planner -> answer");
       log("Planner chose answer");
+      actionHistory.push(action.action);
       break;
     }
+
     if (action.action === "listClasses") {
       await callListClasses();
     } else if (action.action === "listIriByClass") {
@@ -251,21 +291,47 @@ export async function runAsk(question: string, log: (s: string) => void) {
         log("open_and_moves skipped (no target)");
       }
     }
+
+    actionHistory.push(action.action);
   }
 
   // Class sweep
   log(`Post-planner summary: classes=${classes.length}, nodes=${nodes.size}, queue=${queue.length}`);
   if (!classes.length) await callListClasses();
-  const classList = classes.length ? classes : [DEFAULT_CLASS];
+  const classList = (classes.length ? classes : [DEFAULT_CLASS]).slice().sort((a, b) => {
+    if (a === DEFAULT_CLASS) return -1;
+    if (b === DEFAULT_CLASS) return 1;
+    const aGuardian = a.startsWith(DEFAULT_FOCUS_BASE);
+    const bGuardian = b.startsWith(DEFAULT_FOCUS_BASE);
+    if (aGuardian && !bGuardian) return -1;
+    if (!aGuardian && bGuardian) return 1;
+    return a.localeCompare(b);
+  });
   log(`Sweeping classes (${classList.length}): ${classList.join(", ")}`);
   for (const c of classList) {
     if (nodes.size + queue.length >= MAX_NODES) break;
     await callListIriByClass(c);
   }
+  const prioritized = queue.filter((iri) => matchesQuestion(iri));
+  const remaining = queue.filter((iri) => !matchesQuestion(iri));
+  queue.length = 0;
+  prioritized.forEach((iri) => queue.push(iri));
+  remaining.forEach((iri) => queue.push(iri));
+
   log(`Queue before opens: ${queue.length}`);
+  const relationKeywords = ["father", "mother", "parent", "spouse", "husband", "wife", "pet", "child", "kid", "descendant"];
+  const questionNeedsRelations = relationKeywords.some((kw) => questionLc.includes(kw));
+  let openedTarget = false;
   while (queue.length && nodes.size < MAX_NODES) {
     const iri = queue.shift()!;
     await callOpenAndMoves(iri, MAX_EDGES_PER_NODE);
+    if (matchesQuestion(iri)) {
+      openedTarget = true;
+    }
+    if (openedTarget && questionNeedsRelations) {
+      log("Early stop after opening target(s) relevant to question");
+      break;
+    }
   }
 
   const firstNode = nodes.size ? Array.from(nodes.values())[0] : undefined;
