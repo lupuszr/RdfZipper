@@ -83,10 +83,21 @@ export class ZipperEngine {
       ? `FILTER(?p IN (${cursor.allowedPredicates.map(p => `<${p}>`).join(', ')}))`
       : '';
 
+    const rdfTypeIri = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
     const q = `
       SELECT ?p ?o WHERE {
-        <${cursor.focusIri}> ?p ?o .
-        ${filter}
+        {
+          <${cursor.focusIri}> ?p ?o .
+          ${filter}
+        }
+        UNION
+        {
+          ?s <${rdfTypeIri}> <${cursor.focusIri}> .
+          BIND(<${rdfTypeIri}> AS ?p)
+          BIND(?s AS ?o)
+          ${filter}
+        }
       }
       ORDER BY STR(?p) STR(?o)
       LIMIT ${cursor.maxEdges}
