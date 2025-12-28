@@ -1,0 +1,20 @@
+services:
+  blazegraph:
+    build:
+      context: .
+      dockerfile: Dockerfile.blazegraph
+    image: guardian-blazegraph:local
+    container_name: guardian-blazegraph
+    ports:
+      - "8889:8080"
+    environment:
+      # Keep the default namespace (usually "kb") and endpoint at:
+      # http://localhost:8889/blazegraph/namespace/kb/sparql
+      - JAVA_OPTS=-Xmx2g
+      - JETTY_PORT=8080
+      - JETTY_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/blazegraph/"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

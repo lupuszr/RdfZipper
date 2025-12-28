@@ -1,0 +1,21 @@
+FROM eclipse-temurin:11-jre-jammy
+
+WORKDIR /app
+
+# Needed for HEALTHCHECK
+RUN apt-get update \
+  && apt-get install -y curl \
+  && rm -rf /var/lib/apt/lists/*
+
+# Use the provided Blazegraph standalone server jar
+COPY blazegraph.jar /app/blazegraph.jar
+
+ENV JAVA_OPTS="-Xmx2g" \
+    JETTY_PORT=8080 \
+    JETTY_HOST=0.0.0.0
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=30 CMD curl -fsS "http://localhost:${JETTY_PORT}/bigdata/" || exit 1
+
+ENTRYPOINT ["sh", "-c", "java -server ${JAVA_OPTS} -Djetty.port=${JETTY_PORT} -Djetty.host=${JETTY_HOST} -jar /app/blazegraph.jar"]
