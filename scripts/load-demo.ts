@@ -16,18 +16,21 @@ INSERT DATA {
   :Animal a owl:Class .
 
   :age a owl:DatatypeProperty ; rdfs:domain :Person ; rdfs:range xsd:integer .
-  :hasParent a owl:ObjectProperty ; rdfs:domain :Person ; rdfs:range :Person .
-  :hasSpouse a owl:ObjectProperty ; rdfs:domain :Person ; rdfs:range :Person ; a owl:SymmetricProperty .
-  :hasPet a owl:ObjectProperty ; rdfs:domain :Person ; rdfs:range :Animal .
+:hasParent a owl:ObjectProperty ; rdfs:domain :Person ; rdfs:range :Person .
+:hasSpouse a owl:ObjectProperty ; rdfs:domain :Person ; rdfs:range :Person ; a owl:SymmetricProperty .
+:hasPet a owl:ObjectProperty ; rdfs:domain :Person ; rdfs:range :Animal .
+:hasDescendant a owl:ObjectProperty ; owl:inverseOf :hasAncestor .
 
-  :barks a owl:DatatypeProperty ; rdfs:domain :Animal ; rdfs:range xsd:boolean .
+:barks a owl:DatatypeProperty ; rdfs:domain :Animal ; rdfs:range xsd:boolean .
+
   :speciesName a owl:DatatypeProperty ; rdfs:domain :Animal ; rdfs:range xsd:string .
 
   # instances
-  :Alice a :Person ; :age 30 ; :hasSpouse :Bob ; :hasParent :Carol ; :hasPet :Fido .
-:Bob   a :Person ; :age 32 ; :hasSpouse :Alice ; :hasParent :Dave  ; :hasPet :Hank .
-:Carol a :Person ; :age 55 ; :hasParent :Dave .
-:Dave  a :Person ; :age 60 .
+  :Alice a :Person ; :age 30 ; :hasSpouse :Bob ; :hasParent :Dave ; :hasParent :Carol ; :hasPet :Fido .
+:Bob   a :Person ; :age 32 ; :hasSpouse :Alice ; :hasPet :Hank .
+:Carol a :Person ; :age 55 ; :hasSpouse :Dave .
+:Dave  a :Person ; :age 60 ; :hasSpouse :Carol ; :hasParent :Eve .
+:Eve   a :Person ; :age 80 .
 
 
   :Fido a :Animal ; :barks true ; :speciesName "dog" .

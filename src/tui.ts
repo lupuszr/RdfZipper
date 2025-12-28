@@ -16,8 +16,10 @@ const DEFAULT_ALLOWED = [
   'https://example.org/guardian#speciesName',
   'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
   'https://example.org/guardian#hasAncestor',
+  'https://example.org/guardian#hasDescendant',
   'https://example.org/guardian#hasParent'
 ];
+
 
 const program = new Command();
 program
