@@ -80,7 +80,16 @@ async function main(): Promise<void> {
     try {
       log("Starting...");
       const { facts, llm } = await runAsk(q, log, { budget: parsedBudget });
-      answerBox.setContent(`Facts (no heuristics):\n${facts}\n\nLLM:\n${llm}`);
+      let budgetLine = "";
+      try {
+        const parsed = JSON.parse(facts);
+        if (parsed?.budget && typeof parsed.budget.total === "number") {
+          budgetLine = `Budget: total=${parsed.budget.total} used=${parsed.budget.used} remaining=${parsed.budget.remaining}\n\n`;
+        }
+      } catch {
+        // ignore parse errors; fall back to raw facts
+      }
+      answerBox.setContent(`${budgetLine}Facts (no heuristics):\n${facts}\n\nLLM:\n${llm}`);
       log("Done");
     } catch (err: any) {
       answerBox.setContent(`Error: ${err?.message ?? err}`);
