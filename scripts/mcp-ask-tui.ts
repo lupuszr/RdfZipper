@@ -5,8 +5,10 @@ import { runAsk } from "./mcp-ask-core.js";
 async function main(): Promise<void> {
   const program = new Command();
   program.option("-q, --question <text>", "Natural language question");
+  program.option("--budget <number>", "Move budget (default 30)");
   program.parse(process.argv);
-  const { question = "" } = program.opts<{ question?: string }>();
+  const { question = "", budget } = program.opts<{ question?: string; budget?: string }>();
+  const parsedBudget = budget !== undefined && Number.isFinite(Number(budget)) ? Number(budget) : undefined;
 
   const screen = blessed.screen({ smartCSR: true, title: "MCP Ask TUI" });
   const logBox = blessed.box({
@@ -77,7 +79,7 @@ async function main(): Promise<void> {
     screen.render();
     try {
       log("Starting...");
-      const { facts, llm } = await runAsk(q, log);
+      const { facts, llm } = await runAsk(q, log, { budget: parsedBudget });
       answerBox.setContent(`Facts (no heuristics):\n${facts}\n\nLLM:\n${llm}`);
       log("Done");
     } catch (err: any) {

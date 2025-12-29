@@ -12,6 +12,11 @@ const MAX_CLASSES = 1000;
 const MAX_NODES = 10000;
 const MAX_EDGES_PER_NODE = 200;
 const SERVER_LIST_LIMIT = 1000; // must not exceed MCP server LIST_CAP
+const DEFAULT_BUDGET_ENV = Number(process.env.MCP_BUDGET);
+const DEFAULT_BUDGET = Number.isFinite(DEFAULT_BUDGET_ENV) ? DEFAULT_BUDGET_ENV : 30;
+const COST_LIST_CLASSES = 1;
+const COST_LIST_IRI_BY_CLASS = 10;
+const COST_OPEN_AND_MOVES = 3;
 
 function lastSegment(iri: string): string {
   const m = iri.match(/[^/#]+$/);
@@ -54,6 +59,7 @@ type Facts = {
   nodes: NodeFact[];
   classes: string[];
   steps: string[];
+  budget?: { total: number; used: number; remaining: number };
 };
 
 type PlannerAction =
@@ -64,7 +70,18 @@ type PlannerAction =
 
 async function planner(
   question: string,
-  summary: { classes: string[]; nodes: number; pending: number; stepsTaken: number; recentActions: string[] },
+  summary: {
+    classes: string[];
+    nodes: number;
+    pending: number;
+    stepsTaken: number;
+    recentActions: string[];
+    actionSummary: string;
+    queuePreview: string[];
+    budgetTotal: number;
+    budgetUsed: number;
+    budgetRemaining: number;
+  },
 ): Promise<PlannerAction> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -85,13 +102,15 @@ Available MCP tools (actions map 1:1 to tool calls):
 Constraints and guidance:
 - Hard caps: max classes ${MAX_CLASSES}, max nodes ${MAX_NODES}, max edges per node ${MAX_EDGES_PER_NODE}.
 - Plan within ${MAX_STEPS} steps total.
+- Budget applies: costs -> listClasses=${COST_LIST_CLASSES}, listIriByClass=${COST_LIST_IRI_BY_CLASS}, open_and_moves=${COST_OPEN_AND_MOVES}. Stay within the budget shown in the user summary.
 - Do NOT repeat listClasses once classes are populated, unless you expect new classes.
 - Avoid calling listIriByClass on the same class twice; move on to opens.
 - If there is a non-empty pending queue, prefer open_and_moves until drained or caps reached.
+- Use recentActions/actionSummary and queuePreview to avoid redundant calls; skip actions that add no new coverage.
 - Stop early with answer if no further useful calls remain.
 `;
   const user = `Question: ${question}
-Current summary: classes=${summary.classes.length}, nodes=${summary.nodes}, pending=${summary.pending}, stepsTaken=${summary.stepsTaken}, recentActions=${summary.recentActions.join(";")}.
+Current summary: classes=${summary.classes.length}, nodes=${summary.nodes}, pending=${summary.pending}, stepsTaken=${summary.stepsTaken}, recentActions=${summary.recentActions.join(";")}, actionSummary=${summary.actionSummary}, queuePreview=${summary.queuePreview.join(";")}, budgetTotal=${summary.budgetTotal}, budgetUsed=${summary.budgetUsed}, budgetRemaining=${summary.budgetRemaining}.
 Return the next action only.`;
 
   const resp = await client.chat.completions.create({
@@ -153,7 +172,7 @@ Output format (no extra text):
   return ans;
 }
 
-export async function runAsk(question: string, log: (s: string) => void) {
+export async function runAsk(question: string, log: (s: string) => void, opts?: { budget?: number }) {
   log(`Question: ${question}`);
   const transport = new StdioClientTransport({
     command: SERVER_CMD,
@@ -170,6 +189,28 @@ export async function runAsk(question: string, log: (s: string) => void) {
   const queue: string[] = [];
   const steps: string[] = [];
   const actionHistory: string[] = [];
+
+  const budgetTotal = Math.max(0, Math.floor(opts?.budget ?? DEFAULT_BUDGET));
+  let budgetUsed = 0;
+  const budgetRemaining = () => Math.max(0, budgetTotal - budgetUsed);
+  const costForAction = (a: PlannerAction["action"]): number => {
+    if (a === "listClasses") return COST_LIST_CLASSES;
+    if (a === "listIriByClass") return COST_LIST_IRI_BY_CLASS;
+    if (a === "open_and_moves") return COST_OPEN_AND_MOVES;
+    return 0;
+  };
+  const trySpend = (action: PlannerAction["action"], context: string): boolean => {
+    const cost = costForAction(action);
+    if (cost > budgetRemaining()) {
+      steps.push(`budget exhausted before ${context} (cost ${cost})`);
+      log(`budget exhausted before ${context} (cost ${cost})`);
+      return false;
+    }
+    budgetUsed += cost;
+    steps.push(`budget spend ${action} cost=${cost} remaining=${budgetRemaining()}`);
+    log(`budget spend ${action} cost=${cost} remaining=${budgetRemaining()}`);
+    return true;
+  };
 
   const questionLc = question.toLowerCase();
   const matchesQuestion = (iri: string) => questionLc.includes(lastSegment(iri).toLowerCase());
@@ -241,7 +282,28 @@ export async function runAsk(question: string, log: (s: string) => void) {
 
   // Planner loop
   for (let step = 0; step < MAX_STEPS; step++) {
-    const summary = { classes, nodes: nodes.size, pending: queue.length, stepsTaken: step, recentActions: actionHistory.slice(-5) };
+    const recentActions = actionHistory.slice(-30);
+    const actionCounts = recentActions.reduce((acc: Record<string, number>, a) => {
+      acc[a] = (acc[a] ?? 0) + 1;
+      return acc;
+    }, {});
+    const actionSummary = Object.entries(actionCounts)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(",");
+    const queuePreview = queue.slice(0, 3);
+
+    const summary = {
+      classes,
+      nodes: nodes.size,
+      pending: queue.length,
+      stepsTaken: step,
+      recentActions,
+      actionSummary,
+      queuePreview,
+      budgetTotal,
+      budgetUsed,
+      budgetRemaining: budgetRemaining(),
+    };
     let action = await planner(question, summary);
     const lastAction = actionHistory[actionHistory.length - 1];
 
@@ -267,6 +329,13 @@ export async function runAsk(question: string, log: (s: string) => void) {
       overrideToOpenOrAnswer("repeat action");
     }
 
+    const actionCost = costForAction(action.action);
+    if (action.action !== "answer" && actionCost > budgetRemaining()) {
+      steps.push(`budget exhausted before ${action.action} (cost ${actionCost}) -> answer`);
+      log(`budget exhausted before ${action.action} (cost ${actionCost}) -> answer`);
+      action = { action: "answer", args: {} };
+    }
+
     if (action.action === "answer") {
       steps.push("planner -> answer");
       log("Planner chose answer");
@@ -274,30 +343,61 @@ export async function runAsk(question: string, log: (s: string) => void) {
       break;
     }
 
+    let executed = false;
     if (action.action === "listClasses") {
+      if (!trySpend("listClasses", "listClasses")) {
+        actionHistory.push(action.action);
+        break;
+      }
       await callListClasses();
+      executed = true;
     } else if (action.action === "listIriByClass") {
+      if (!trySpend("listIriByClass", "listIriByClass")) {
+        actionHistory.push(action.action);
+        break;
+      }
       const classIri = action.args?.classIri ?? DEFAULT_CLASS;
       await callListIriByClass(String(classIri));
+      executed = true;
     } else if (action.action === "open_and_moves") {
       const target = action.args?.focusIri ? String(action.args.focusIri) : queue.shift();
-      if (target) {
+      if (!target) {
+        log("open_and_moves skipped (no target)");
+      } else {
+        if (!trySpend("open_and_moves", "open_and_moves")) {
+          actionHistory.push(action.action);
+          break;
+        }
         const maxEdges = Math.min(
           Number(action.args?.maxEdges ?? MAX_EDGES_PER_NODE) || MAX_EDGES_PER_NODE,
           MAX_EDGES_PER_NODE,
         );
         await callOpenAndMoves(target, maxEdges);
-      } else {
-        log("open_and_moves skipped (no target)");
+        executed = true;
       }
     }
 
-    actionHistory.push(action.action);
+    if (budgetRemaining() <= 0) {
+      steps.push("budget exhausted; stopping opens");
+      log("budget exhausted; stopping opens");
+      actionHistory.push(action.action);
+      break;
+    }
+
+    if (executed) {
+      actionHistory.push(action.action);
+    }
   }
 
   // Class sweep
   log(`Post-planner summary: classes=${classes.length}, nodes=${nodes.size}, queue=${queue.length}`);
-  if (!classes.length) await callListClasses();
+  if (!classes.length) {
+    if (!trySpend("listClasses", "listClasses sweep")) {
+      log("budget exhausted before listClasses sweep");
+    } else {
+      await callListClasses();
+    }
+  }
   const classList = (classes.length ? classes : [DEFAULT_CLASS]).slice().sort((a, b) => {
     if (a === DEFAULT_CLASS) return -1;
     if (b === DEFAULT_CLASS) return 1;
@@ -310,19 +410,21 @@ export async function runAsk(question: string, log: (s: string) => void) {
   log(`Sweeping classes (${classList.length}): ${classList.join(", ")}`);
   for (const c of classList) {
     if (nodes.size + queue.length >= MAX_NODES) break;
+    if (!trySpend("listIriByClass", `listIriByClass(${c})`)) {
+      log("budget exhausted during class sweep");
+      break;
+    }
     await callListIriByClass(c);
   }
-  const prioritized = queue.filter((iri) => matchesQuestion(iri));
-  const remaining = queue.filter((iri) => !matchesQuestion(iri));
-  queue.length = 0;
-  prioritized.forEach((iri) => queue.push(iri));
-  remaining.forEach((iri) => queue.push(iri));
-
   log(`Queue before opens: ${queue.length}`);
   const relationKeywords = ["father", "mother", "parent", "spouse", "husband", "wife", "pet", "child", "kid", "descendant"];
   const questionNeedsRelations = relationKeywords.some((kw) => questionLc.includes(kw));
   let openedTarget = false;
   while (queue.length && nodes.size < MAX_NODES) {
+    if (!trySpend("open_and_moves", "open_and_moves queue")) {
+      log("budget exhausted before opening queue");
+      break;
+    }
     const iri = queue.shift()!;
     await callOpenAndMoves(iri, MAX_EDGES_PER_NODE);
     if (matchesQuestion(iri)) {
@@ -332,18 +434,24 @@ export async function runAsk(question: string, log: (s: string) => void) {
       log("Early stop after opening target(s) relevant to question");
       break;
     }
+    if (budgetRemaining() <= 0) {
+      log("budget exhausted during opens");
+      break;
+    }
   }
-
   const firstNode = nodes.size ? Array.from(nodes.values())[0] : undefined;
   const factsObj: Facts = {
     focus: firstNode?.iri ?? "",
     nodes: Array.from(nodes.values()),
     classes,
     steps,
+    budget: { total: budgetTotal, used: budgetUsed, remaining: budgetRemaining() },
   };
 
   const facts = JSON.stringify(factsObj, null, 2);
-  log(`FACTS nodes=${factsObj.nodes.length}, classes=${factsObj.classes.length}, steps=${factsObj.steps.length}`);
+  log(
+    `FACTS nodes=${factsObj.nodes.length}, classes=${factsObj.classes.length}, steps=${factsObj.steps.length}, budget=${factsObj.budget?.remaining}/${factsObj.budget?.total}`,
+  );
   factsObj.nodes.forEach((n) => {
     log(`node ${lastSegment(n.iri)} edges=${n.edges.length} complete=${n.complete_outgoing} truncated=${n.edges_truncated}`);
   });
