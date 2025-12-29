@@ -5,8 +5,9 @@ async function main(): Promise<void> {
   const program = new Command();
   program.requiredOption("-q, --question <text>", "Natural language question");
   program.option("--budget <number>", "Move budget (default 30)");
+  program.option("--debug", "Enable debug logging/reasons");
   program.parse(process.argv);
-  const { question, budget } = program.opts<{ question: string; budget?: string }>();
+  const { question, budget, debug } = program.opts<{ question: string; budget?: string; debug?: boolean }>();
 
   const parsedBudget = budget !== undefined && Number.isFinite(Number(budget)) ? Number(budget) : undefined;
 
@@ -16,7 +17,7 @@ async function main(): Promise<void> {
     console.log(s);
   };
 
-  const { facts, llm } = await runAsk(question, log, { budget: parsedBudget });
+  const { facts, llm } = await runAsk(question, log, { budget: parsedBudget, debug: Boolean(debug) });
   console.log("\n--- FACTS ---\n" + facts);
   console.log("\n--- LLM ---\n" + llm);
 }

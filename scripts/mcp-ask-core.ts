@@ -65,10 +65,18 @@ type Facts = {
 };
 
 type PlannerAction =
-  | { action: "listClasses"; args?: { limit?: number } }
-  | { action: "listIriByClass"; args: { classIri: string; limit?: number } }
-  | { action: "open_and_moves"; args: { focusIri?: string; maxEdges?: number } }
-  | { action: "answer"; args?: Record<string, unknown> };
+  | { action: "listClasses"; args?: { limit?: number }; reason?: string }
+  | {
+      action: "listIriByClass";
+      args: { classIri: string; limit?: number };
+      reason?: string;
+    }
+  | {
+      action: "open_and_moves";
+      args: { focusIri?: string; maxEdges?: number };
+      reason?: string;
+    }
+  | { action: "answer"; args?: Record<string, unknown>; reason?: string };
 
 async function planner(
   question: string,
@@ -85,6 +93,7 @@ async function planner(
     budgetRemaining: number;
     questionHints: string;
   },
+  debug: boolean,
 ): Promise<PlannerAction> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -100,7 +109,7 @@ async function planner(
   }
 
   const client = new OpenAI({ apiKey });
-  const system = `You are a planner that chooses the NEXT MCP tool call. Output ONLY JSON: {"action":"...","args":{...}}.
+  const system = `You are a planner that chooses the NEXT MCP tool call. Output ONLY JSON: {"action":"...","args":{...},"reason":"<why>"} (reason is REQUIRED).
 Available MCP tools (actions map 1:1 to tool calls):
 - listClasses(limit?): returns JSON with a "classes" array of IRIs.
 - listIriByClass(classIri, limit?): returns JSON with an "items" array; each item has an iri of that class. Default class: ${DEFAULT_CLASS}.
@@ -111,8 +120,8 @@ Context:
 Constraints and guidance:
 - Hard caps: max classes ${MAX_CLASSES}, max nodes ${MAX_NODES}, max edges per node ${MAX_EDGES_PER_NODE}.
 - Plan within ${MAX_STEPS} steps total.
+- Carefully analyze the question! If there is an URI passed use that otherwise start with a listClasses then prioritize listIriByClass if it makes sense and just then start iterating
 - Budget applies: costs -> listClasses=${COST_LIST_CLASSES}, listIriByClass=${COST_LIST_IRI_BY_CLASS}, open_and_moves=${COST_OPEN_AND_MOVES}. Stay within the budget shown in the user summary.
-- Carefully analize the question. If there is no specified IRI Always start with listClasses to understand what we have. Once we have that try to list all instances of a class. Only if you don't see anything try to iterate
 - If the question explicitly asks to list instances of a class (e.g., "list all cities"), call listIriByClass for that class early; only open nodes if attributes are required.
 - Do NOT repeat listClasses once classes are populated, unless you expect new classes.
 - Avoid calling listIriByClass on the same class twice; move on to opens.
@@ -122,7 +131,7 @@ Constraints and guidance:
 `;
   const user = `Question: ${question}
 Current summary: classes=${summary.classes.length}, nodes=${summary.nodes}, pending=${summary.pending}, stepsTaken=${summary.stepsTaken}, recentActions=${summary.recentActions.join(";")}, actionSummary=${summary.actionSummary}, queuePreview=${summary.queuePreview.join(";")}, budgetTotal=${summary.budgetTotal}, budgetUsed=${summary.budgetUsed}, budgetRemaining=${summary.budgetRemaining}, questionHints=${summary.questionHints}.
-Return the next action only.`;
+Return the next action only. Include an optional 'reason' explaining your choice.`;
 
   const resp = await client.chat.completions.create({
     model: MODEL,
@@ -143,9 +152,11 @@ Return the next action only.`;
       parsed.action === "listIriByClass" ||
       parsed.action === "open_and_moves")
   ) {
-    return parsed as PlannerAction;
+    const reason =
+      typeof parsed.reason === "string" ? parsed.reason : "no reason provided";
+    return { ...parsed, reason } as PlannerAction;
   }
-  return { action: "answer", args: {} };
+  return { action: "answer", args: {}, reason: "fallback" };
 }
 
 async function answerWithLLM(
@@ -190,7 +201,7 @@ Output format (no extra text):
 export async function runAsk(
   question: string,
   log: (s: string) => void,
-  opts?: { budget?: number },
+  opts?: { budget?: number; debug?: boolean },
 ) {
   log(`Question: ${question}`);
   const transport = new StdioClientTransport({
@@ -212,6 +223,7 @@ export async function runAsk(
   const steps: string[] = [];
   const actionHistory: string[] = [];
 
+  const debug = Boolean(opts?.debug ?? process.env.DEBUG);
   const budgetTotal = Math.max(0, Math.floor(opts?.budget ?? DEFAULT_BUDGET));
   let budgetUsed = 0;
   const budgetRemaining = () => Math.max(0, budgetTotal - budgetUsed);
@@ -371,8 +383,14 @@ export async function runAsk(
       budgetRemaining: budgetRemaining(),
       questionHints,
     };
-    let action = await planner(question, summary);
+    let action = await planner(question, summary, debug);
     const lastAction = actionHistory[actionHistory.length - 1];
+
+    if (debug) {
+      const msg = `planner choice: ${action.action} reason=${action.reason ?? "none"}`;
+      steps.push(msg);
+      log(msg);
+    }
 
     const overrideToOpenOrAnswer = (reason: string): void => {
       const fallback: PlannerAction["action"] = queue.length
@@ -382,13 +400,9 @@ export async function runAsk(
       log(`planner override (${reason}) -> ${fallback}`);
       action =
         fallback === "open_and_moves"
-          ? { action: "open_and_moves", args: {} }
-          : { action: "answer", args: {} };
+          ? { action: "open_and_moves", args: {}, reason: `override:${reason}` }
+          : { action: "answer", args: {}, reason: `override:${reason}` };
     };
-
-    if (action.action === "listClasses" && classes.length > 0) {
-      overrideToOpenOrAnswer("listClasses already done");
-    }
 
     if (action.action === "listIriByClass") {
       const classIri = String(action.args?.classIri ?? DEFAULT_CLASS);
@@ -399,6 +413,12 @@ export async function runAsk(
 
     if (lastAction === action.action && action.action !== "open_and_moves") {
       overrideToOpenOrAnswer("repeat action");
+    }
+
+    if (debug && action.reason) {
+      const msg = `planner reason (${action.action}): ${action.reason}`;
+      steps.push(msg);
+      log(msg);
     }
 
     const actionCost = costForAction(action.action);
@@ -479,28 +499,30 @@ export async function runAsk(
       await callListClasses();
     }
   }
-  const questionMentionsCity =
-    questionHints.includes("city") || questionHints.includes("cities");
+  // const questionMentionsCity =
+  //   questionHints.includes("city") || questionHints.includes("cities");
 
-  const guardianClassesRaw = (
-    classes.length ? classes : [DEFAULT_CLASS]
-  ).filter((c) => c.startsWith(DEFAULT_FOCUS_BASE));
+  const guardianClassesRaw = classes;
+
+  // (
+  //   classes.length ? classes : [DEFAULT_CLASS]
+  // ).filter((c) => c.startsWith(DEFAULT_FOCUS_BASE));
   const guardianClasses = guardianClassesRaw.length
     ? guardianClassesRaw
     : [DEFAULT_CLASS];
 
-  const classList = guardianClasses.sort((a, b) => {
-    const score = (cls: string) => {
-      if (cls === `${DEFAULT_FOCUS_BASE}City` && questionMentionsCity) return 0;
-      if (cls === `${DEFAULT_FOCUS_BASE}Person`) return 1;
-      if (cls === `${DEFAULT_FOCUS_BASE}City`) return 2;
-      if (cls === `${DEFAULT_FOCUS_BASE}Animal`) return 3;
-      return 4;
-    };
-    const diff = score(a) - score(b);
-    if (diff !== 0) return diff;
-    return a.localeCompare(b);
-  });
+  const classList = guardianClasses; //.sort((a, b) => {
+  //   const score = (cls: string) => {
+  //     if (cls === `${DEFAULT_FOCUS_BASE}City` && questionMentionsCity) return 0;
+  //     if (cls === `${DEFAULT_FOCUS_BASE}Person`) return 1;
+  //     if (cls === `${DEFAULT_FOCUS_BASE}City`) return 2;
+  //     if (cls === `${DEFAULT_FOCUS_BASE}Animal`) return 3;
+  //     return 4;
+  //   };
+  //   const diff = score(a) - score(b);
+  //   if (diff !== 0) return diff;
+  //   return a.localeCompare(b);
+  // });
 
   log(`Sweeping classes (${classList.length}): ${classList.join(", ")}`);
   for (const c of classList) {
@@ -512,21 +534,6 @@ export async function runAsk(
     await callListIriByClass(c);
   }
   log(`Queue before opens: ${queue.length}`);
-  const relationKeywords = [
-    "father",
-    "mother",
-    "parent",
-    "spouse",
-    "husband",
-    "wife",
-    "pet",
-    "child",
-    "kid",
-    "descendant",
-  ];
-  const questionNeedsRelations = relationKeywords.some((kw) =>
-    questionLc.includes(kw),
-  );
   let openedTarget = false;
   while (queue.length && nodes.size < MAX_NODES) {
     if (!trySpend("open_and_moves", "open_and_moves queue")) {
@@ -538,7 +545,7 @@ export async function runAsk(
     if (matchesQuestion(iri)) {
       openedTarget = true;
     }
-    if (openedTarget && questionNeedsRelations) {
+    if (openedTarget) {
       log("Early stop after opening target(s) relevant to question");
       break;
     }

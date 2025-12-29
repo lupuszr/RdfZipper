@@ -6,9 +6,11 @@ async function main(): Promise<void> {
   const program = new Command();
   program.option("-q, --question <text>", "Natural language question");
   program.option("--budget <number>", "Move budget (default 30)");
+  program.option("--debug", "Enable debug logging/reasons");
   program.parse(process.argv);
-  const { question = "", budget } = program.opts<{ question?: string; budget?: string }>();
+  const { question = "", budget, debug } = program.opts<{ question?: string; budget?: string; debug?: boolean }>();
   const parsedBudget = budget !== undefined && Number.isFinite(Number(budget)) ? Number(budget) : undefined;
+  const parsedDebug = Boolean(debug);
 
   const screen = blessed.screen({ smartCSR: true, title: "MCP Ask TUI" });
   const logBox = blessed.box({
@@ -79,7 +81,7 @@ async function main(): Promise<void> {
     screen.render();
     try {
       log("Starting...");
-      const { facts, llm } = await runAsk(q, log, { budget: parsedBudget });
+      const { facts, llm } = await runAsk(q, log, { budget: parsedBudget, debug: parsedDebug });
       let budgetLine = "";
       try {
         const parsed = JSON.parse(facts);
